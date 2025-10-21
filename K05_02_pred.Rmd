@@ -1,0 +1,431 @@
+---
+title: "ML_pred_K05_02"
+author: "mhprs"
+date: "2025-10-18"
+output: html_document
+---
+
+
+```{r чтение_и_обьединения_данных}
+train_data <- read.csv("D:\\Desktop\\Remote\\nowadays\\ITMO\\Genotek\\smth\\R\\data\\train_merged.csv")
+train_data$set <- "train"
+
+test_data <- read.csv("D:/Desktop/Remote/nowadays/ITMO/Genotek/smth/R/data/datamicro_abundance_species_K05_K02_E11.csv")
+test_data$set <- "test"
+
+names(test_data)[names(test_data) =="K05..Gingivitis.and.periodontal.diseases"] <- "K05" 
+names(test_data)[names(test_data) =="K02..Dental.caries"] <- "K02" 
+test_data$BioProject <-  "" 
+
+library(tidyverse)
+
+train_data <- train_data %>%
+  mutate(
+    K05 = ifelse(CaseStatus == "periodontitis", 1, 0),
+    K02 = ifelse(CaseStatus == "caries", 1, 0)
+  )
+
+test_data <- test_data %>%
+  mutate(
+    K05 = as.numeric(as.logical(K05)),
+    K02 = as.numeric(as.logical(K02))
+  )
+
+
+cols_with_s <- grep("s__", names(train_data), value = TRUE)
+train_data <- train_data %>%
+  select(all_of(c(cols_with_s, "set", "K05", "K02", "BioProject")))
+names(train_data) <-  gsub(".*s__", "", names(train_data))
+
+
+# Ообщие столбцы
+common_col <- intersect(names(train_data), names(test_data))
+train_common <- train_data %>% select(all_of(common_col))
+test_common <- test_data %>% select(all_of(common_col))
+
+combined_data <- bind_rows(train_common, test_common)
+
+# Удалить всё лишнее
+rm(list = ls()[!ls() %in% c("combined_data")])
+
+print(paste("Общие столбцы:", ncol(combined_data)))
+print(paste("Всего строк:", nrow(combined_data)))
+
+```
+```{r}
+# BiocManager::install("sva")
+```
+
+```{r предобработка данных}
+library(compositions)
+library(sva)
+library(caret)
+
+# Разделяем метаданные и данные представленности
+meta_cols <- c("set", "K05", "K02", "BioProject")
+abundance_cols <- setdiff(names(combined_data), meta_cols)
+
+metadata <- combined_data %>% select(all_of(meta_cols))
+abundance_data <- combined_data %>% select(all_of(abundance_cols))
+
+# ========== 1. ФИЛЬТРАЦИЯ ШУМОВ ==========
+print("Фильтрация низкопредставленных признаков...")
+
+# Параметры фильтрации
+prevalence_threshold <- 0.1  # присутствует минимум в 10% образцов
+mean_abundance_threshold <- 1e-5  # минимальное средняя представленность
+
+abundance_filtered <- abundance_data %>%
+  select(where(~{
+    prevalence <- sum(. > 0) / length(.)
+    mean_abundance <- mean(., na.rm = TRUE)
+    prevalence >= prevalence_threshold & mean_abundance >= mean_abundance_threshold
+  }))
+
+print(paste("Осталось признаков после фильтрации:", ncol(abundance_filtered)))
+
+# ========== 2. CLR ТРАНСФОРМАЦИЯ ==========
+print("CLR трансформация...")
+abundance_clr <- as.data.frame(clr(acomp(abundance_filtered)))
+
+# ========== 3. ОТБОР ПРИЗНАКОВ ПО ВАРИАЦИИ ==========
+print("Отбор признаков по объясненной дисперсии...")
+
+# Вычисляем вариацию для каждого признака
+feature_variance <- apply(abundance_clr, 2, var)
+feature_variance_sorted <- sort(feature_variance, decreasing = TRUE)
+
+# Находим признаки, объясняющие 95% суммарной вариации
+cumulative_variance <- cumsum(feature_variance_sorted) / sum(feature_variance_sorted)
+n_features_95 <- which(cumulative_variance >= 0.95)[1]
+
+# Отбираем топ признаков
+top_features <- names(feature_variance_sorted)[1:n_features_95]
+abundance_clr_filtered <- abundance_clr %>% select(all_of(top_features))
+
+print(paste("Отобрано признаков (95% дисперсии):", ncol(abundance_clr_filtered)))
+
+# ========== 4. УДАЛЕНИЕ BATCH EFFECT ==========
+library(limma)
+print("Удаление batch effect...")
+
+train_idx <- which(metadata$set == "train")
+test_idx <- which(metadata$set == "test")
+
+train_abundance <- abundance_clr_filtered[train_idx, ]
+test_abundance  <- abundance_clr_filtered[test_idx, ]
+train_meta <- metadata[train_idx, ]
+test_meta  <- metadata[test_idx, ]
+
+batches <- train_meta$BioProject
+
+if (length(unique(batches)) > 1) {
+  train_abundance_corrected <- removeBatchEffect(
+    x = t(train_abundance),             # samples x features → transpose
+    batch = batches,
+    covariates = model.matrix(~ K05 + K02, data = train_meta)[, -1, drop = FALSE]
+  )
+  train_abundance_corrected <- as.data.frame(t(train_abundance_corrected))
+  print("Batch effect удален")
+} else {
+  train_abundance_corrected <- train_abundance
+  print("Только один batch, коррекция не требуется")
+}
+
+# ========== 5. УДАЛЕНИЕ ВЫСОКОКОРРЕЛИРОВАННЫХ ПРИЗНАКОВ ==========
+print("Удаление высококоррелированных признаков...")
+
+# Вычисляем корреляционную матрицу на train данных
+cor_matrix <- cor(train_abundance_corrected)
+high_cor_threshold <- 0.95
+highly_correlated <- findCorrelation(cor_matrix, cutoff = high_cor_threshold)
+
+if(length(highly_correlated) > 0) {
+  print(paste("Удаляем", length(highly_correlated), "высококоррелированных признаков"))
+  
+  train_abundance_final <- train_abundance_corrected[, -highly_correlated]
+  test_abundance_final <- test_abundance[, -highly_correlated]
+} else {
+  train_abundance_final <- train_abundance_corrected
+  test_abundance_final <- test_abundance
+  print("Высококоррелированных признаков не найдено")
+}
+
+# ========== 6. ОБЪЕДИНЯЕМ ОБРАТНО ==========
+print("Финальное объединение данных...")
+final_train <- cbind(train_meta, train_abundance_final)
+final_test <- cbind(test_meta, test_abundance_final)
+final_combined <- bind_rows(final_train, final_test)
+
+# ========== ИТОГОВАЯ СТАТИСТИКА ==========
+cat("\n=== ИТОГОВАЯ СТАТИСТИКА ===\n")
+cat("Начальное количество признаков:", ncol(abundance_data), "\n")
+cat("После фильтрации шумов:", ncol(abundance_filtered), "\n")
+cat("После отбора по дисперсии (95%):", ncol(abundance_clr_filtered), "\n")
+cat("После удаления коррелированных:", ncol(train_abundance_final), "\n")
+cat("Итоговое количество строк:", nrow(final_combined), "\n")
+cat("Train образцов:", sum(final_combined$set == "train"), "\n")
+cat("Test образцов:", sum(final_combined$set == "test"), "\n")
+
+# память
+rm(list = ls()[!ls() %in% c("final_combined", "final_train", "final_test")])
+```
+```{r обучение_на_откртых_данных}
+library(caret)
+library(pROC)
+
+# Подготовка данных
+train_full <- final_combined %>% filter(set == "train")
+feature_cols <- setdiff(names(train_full), c("set", "K05", "K02", "BioProject"))
+
+# Функция обучения моделей
+train_disease_models <- function(data, target_col, disease_name) {
+  
+  cat("\n", rep("=", 50), "\n", sep="")
+  cat("ОБУЧЕНИЕ:", disease_name, "\n")
+  cat(rep("=", 50), "\n")
+  
+  # Подготовка
+  X <- data %>% select(all_of(feature_cols))
+  y <- factor(data[[target_col]], levels = c(0, 1), labels = c("Negative", "Positive"))
+  
+  cat("Баланс классов:", table(y)[1], "/", table(y)[2], "\n")
+  cat("Процент больных:", round(100 * sum(y == "Positive") / length(y), 1), "%\n")
+  
+  # Стратифицированное разделение 80/20 (сохраняет пропорции классов)
+  set.seed(42)
+  train_index <- createDataPartition(y, p = 0.8, list = FALSE)
+  X_train <- X[train_index, ]
+  y_train <- y[train_index]
+  X_test <- X[-train_index, ]
+  y_test <- y[-train_index]
+  
+  cat("Train баланс:", table(y_train)[1], "/", table(y_train)[2], 
+      "(", round(100 * sum(y_train == "Positive") / length(y_train), 1), "%)\n")
+  cat("Test баланс:", table(y_test)[1], "/", table(y_test)[2], 
+      "(", round(100 * sum(y_test == "Positive") / length(y_test), 1), "%)\n")
+  
+  # Настройки CV (со стратификацией и балансировкой)
+  train_control <- trainControl(
+    method = "cv",
+    number = 5,
+    classProbs = TRUE,
+    summaryFunction = twoClassSummary,
+    savePredictions = "final",
+    verboseIter = FALSE,
+    sampling = "up"  # Upsampling для балансировки классов в каждом fold
+  )
+  
+  # анстройка моделей параметров(грид-серч)
+  models_config <- list(
+    glmnet = list(  
+      method = "glmnet",
+      tuneGrid = expand.grid(
+        alpha = c(0, 0.5, 1),
+        lambda = 10^seq(-1, 2, length = 5) 
+      ),
+      params = list()
+    ),
+    rf = list(
+      method = "rf",
+      tuneGrid = expand.grid(mtry = c(floor(sqrt(ncol(X_train))))),  
+      params = list(ntree = 100, maxnodes = 30)  
+    ),
+    svmRadial = list(
+      method = "svmRadial",
+      tuneGrid = expand.grid(
+        C = c(0.1, 1),  
+        sigma = c(0.01, 0.1)
+      ),
+      params = list()
+    )
+  )
+  
+  # Обучение всех моделей
+  results <- list()
+  
+  for(name in names(models_config)) {
+    cat(">>> Обучение", name, "...")
+    
+    config <- models_config[[name]]
+    set.seed(42)
+    
+    model <- train(
+      x = X_train, y = y_train,
+      method = config$method,
+      trControl = train_control,
+      tuneGrid = config$tuneGrid,
+      metric = "ROC"
+    )
+    
+    # Оценка на тесте
+    pred_prob <- predict(model, X_test, type = "prob")
+    pred_class <- predict(model, X_test)
+    
+    roc_obj <- roc(y_test, pred_prob$Positive, quiet = TRUE)
+    conf_mat <- confusionMatrix(pred_class, y_test)
+    
+    results[[name]] <- list(
+      model = model,
+      auc = as.numeric(auc(roc_obj)),
+      accuracy = as.numeric(conf_mat$overall["Accuracy"]),
+      sensitivity = as.numeric(conf_mat$byClass["Sensitivity"]),
+      specificity = as.numeric(conf_mat$byClass["Specificity"]),
+      cv_auc = max(model$results$ROC, na.rm = TRUE)
+    )
+    
+    cat(" AUC:", round(results[[name]]$auc, 4), 
+        "| Разница CV-Test:", round(results[[name]]$cv_auc - results[[name]]$auc, 4), "\n")
+  }
+  
+  # Сравнение (добавляем индикатор переобучения)
+  results_df <- data.frame(
+    Model = names(results),
+    Test_AUC = sapply(results, function(x) x$auc),
+    CV_AUC = sapply(results, function(x) x$cv_auc),
+    Overfit = sapply(results, function(x) x$cv_auc - x$auc),  
+    Accuracy = sapply(results, function(x) x$accuracy),
+    Sensitivity = sapply(results, function(x) x$sensitivity),
+    Specificity = sapply(results, function(x) x$specificity)
+  ) %>% arrange(desc(Test_AUC))
+  
+  # Лучшая модель
+  best_name <- results_df$Model[1]
+  best_model <- results[[best_name]]$model
+  
+  return(list(
+    best_model = best_model,
+    best_model_name = best_name,
+    results = results_df
+  ))
+}
+
+# Обучение для обоих заболеваний
+cat("\n### K05 - ПЕРИОДОНТИТ ###\n")
+K05_results <- train_disease_models(train_full, "K05", "K05_Periodontitis")
+saveRDS(K05_results$best_model, "best_model_K05.rds")
+
+cat("\n### K02 - КАРИЕС ###\n")
+K02_results <- train_disease_models(train_full, "K02", "K02_Caries")
+saveRDS(K02_results$best_model, "best_model_K02.rds")
+
+# Финальная сводка
+cat("\n", rep("=", 50), "\n", sep="")
+cat("РЕЗУЛЬТАТЫ\n")
+cat(rep("=", 50), "\n\n")
+
+cat("\nK05 (Периодонтит):\n")
+cat("  Лучшая модель:", K05_results$best_model_name, "\n")
+K05_best <- K05_results$results[1, -1]
+print(round(K05_best, 4))
+if(K05_best$Overfit > 0.05) {
+  cat("  ⚠️  ВНИМАНИЕ: Возможно переобучение (разница CV-Test >0.05)\n")
+}
+
+cat("\nK02 (Кариес):\n")
+cat("  Лучшая модель:", K02_results$best_model_name, "\n")
+K02_best <- K02_results$results[1, -1]
+print(round(K02_best, 4))
+if(K02_best$Overfit > 0.05) {
+  cat("  ⚠️  ВНИМАНИЕ: Возможно переобучение (разница CV-Test >0.05)\n")
+}
+
+cat("\n✓ Модели сохранены: best_model_K05.rds, best_model_K02.rds\n")
+```
+```{r on test}
+
+library(tidyverse)
+library(caret)
+
+# Загружаем сохранённые лучшие модели
+best_model_K05 <- readRDS("best_model_K05.rds")
+best_model_K02 <- readRDS("best_model_K02.rds")
+
+# Извлекаем тестовые данные
+test_data <- final_combined %>% filter(set == "test")
+
+cat("Количество тестовых образцов:", nrow(test_data), "\n\n")
+
+# Подготавливаем признаки
+feature_cols <- setdiff(names(test_data), c("set", "K05", "K02", "BioProject"))
+X_test_final <- test_data %>% select(all_of(feature_cols))
+
+# Функция для оценки модели
+evaluate_model <- function(model, X_test, y_true, disease_name, model_name) {
+  
+  cat(rep("=", 70), "\n", sep="")
+  cat("БОЛЕЗНЬ:", disease_name, "| МОДЕЛЬ:", model_name, "\n")
+  cat(rep("=", 70), "\n\n")
+  
+  # Предсказания
+  y_pred <- predict(model, X_test)
+  
+  # Confusion Matrix через caret
+  cm <- confusionMatrix(y_pred, y_true, positive = "Positive")
+  
+  print(cm)
+  cat("\n")
+  
+  return(cm)
+}
+
+
+K05_model_name <- "glmnet"  # тут в ручную указать для визуализации
+K02_model_name <- "glmnet"
+
+# ========== ТЕСТИРОВАНИЕ K05 ==========
+cat("\n", rep("#", 70), "\n", sep="")
+cat("### K05 - ПЕРИОДОНТИТ ###\n")
+cat(rep("#", 70), "\n\n")
+
+y_test_K05 <- factor(test_data$K05, levels = c(0, 1), 
+                     labels = c("Negative", "Positive"))
+
+K05_cm <- evaluate_model(
+  model = best_model_K05,
+  X_test = X_test_final,
+  y_true = y_test_K05,
+  disease_name = "K05 (Периодонтит)",
+  model_name = K05_model_name
+)
+
+# ========== ТЕСТИРОВАНИЕ K02 ==========
+cat("\n", rep("#", 70), "\n", sep="")
+cat("### K02 - КАРИЕС ###\n")
+cat(rep("#", 70), "\n\n")
+
+y_test_K02 <- factor(test_data$K02, levels = c(0, 1), 
+                     labels = c("Negative", "Positive"))
+
+K02_cm <- evaluate_model(
+  model = best_model_K02,
+  X_test = X_test_final,
+  y_true = y_test_K02,
+  disease_name = "K02 (Кариес)",
+  model_name = K02_model_name
+)
+
+# ========== ИТОГОВОЕ СРАВНЕНИЕ ==========
+cat("\n", rep("=", 70), "\n", sep="")
+cat("СРАВНИТЕЛЬНАЯ ТАБЛИЦА\n")
+cat(rep("=", 70), "\n\n")
+
+comparison <- data.frame(
+  Disease = c("K05_Периодонтит", "K02_Кариес"),
+  Model = c(K05_model_name, K02_model_name),
+  Accuracy = c(K05_cm$overall["Accuracy"], K02_cm$overall["Accuracy"]),
+  Sensitivity = c(K05_cm$byClass["Sensitivity"], K02_cm$byClass["Sensitivity"]),
+  Specificity = c(K05_cm$byClass["Specificity"], K02_cm$byClass["Specificity"]),
+  Precision = c(K05_cm$byClass["Pos Pred Value"], K02_cm$byClass["Pos Pred Value"]),
+  F1 = c(K05_cm$byClass["F1"], K02_cm$byClass["F1"]),
+  Balanced_Accuracy = c(K05_cm$byClass["Balanced Accuracy"], 
+                        K02_cm$byClass["Balanced Accuracy"])
+)
+
+print(round(comparison[, 3:8], 4))
+
+cat("\n✅ ТЕСТИРОВАНИЕ ЗАВЕРШЕНО!\n")
+
+```
+
+
