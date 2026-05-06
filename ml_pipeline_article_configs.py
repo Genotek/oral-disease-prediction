@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 """
-ml_pipeline_article_configs.py
-==============================
-
-Article-aligned ML pipeline for the salivary WGS meta-analysis.
-
-What is intentionally kept:
   1) Classification setting:
        train: target disease vs healthy only
        test : target disease vs healthy only
