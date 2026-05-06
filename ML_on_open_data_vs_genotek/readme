@@ -1,1 +1,0 @@
-Training machine learning models on microbiome data from open-access sources (8 studies) and testing them on the Genotek dataset. The repository includes code for preprocessing, CLR normalization, batch-effect correction, baseline models, and validation.
