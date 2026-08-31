@@ -1,0 +1,19 @@
+Package: oralDiseasePrediction
+Title: Cross-cohort prediction of dental caries and periodontal disease
+Version: 1.0.0
+Description: Version pinning for the R side of the analysis. Not an installable
+    package; this file records the exact versions on which every reported number was
+    produced. The same versions are checked at run time by R/00_data.R, which
+    stops if they differ.
+Depends:
+    R (== 4.6.0)
+Imports:
+    MMUPHin (== 1.20.0),
+    Maaslin2 (== 1.26.0),
+    metafor (== 5.0.1),
+    vegan (== 2.7.5),
+    ggplot2 (== 4.0.3),
+    ggrepel (== 0.9.8),
+    dplyr (== 1.2.1),
+    svglite (== 2.2.2)
+License: MIT
