@@ -96,6 +96,9 @@ uses the same convergence control, so its baseline agrees with the main fit.
 | 1 | `ml/grid_and_schemes.py` | all 72 configurations per disease under three validation schemes: study-grouped CV, class-stratified CV, leave-one-study-out. Also the nested selection over the full grid |
 | 2 | `ml/nested_selection.py` | nested selection repeated separately within each feature space, with the inner-loop results retained |
 | 3 | `ml/compare_schemes.py` | the comparisons quoted in the manuscript: scheme against scheme, weighted against unweighted averaging, nested estimate against the grid maximum |
+| 4 | `ml/cohort_sensitivity.py` | sensitivity of the two final configurations to the largest cohort (PRJNA1057503): leave-one-study-out with equal weight per training cohort, with each training cohort capped at the median size (30 repeats), and with PRJNA1057503 or PRJNA741688 removed from training |
+| 5 | `ml/cohort_sensitivity_subgroups.py` | AUC in the held-out PRJNA1057503 fold for subgroups of cases (systemic condition recorded in `health_status`, one or both diagnoses), with bootstrap confidence intervals; reads `per_sample_predictions.csv` from step 1 |
+| 6 | `ml/make_table_S18.py` | assembles Table S18 from the outputs of steps 4 and 5 |
 
 Step 1 writes incrementally and skips work already on disk, so an interrupted run can be
 resumed by re-invoking it. Per-fold predictions for every held-out sample are retained, so
@@ -105,6 +108,9 @@ any metric can be recomputed without refitting.
 python ml/grid_and_schemes.py --n-jobs 12
 python ml/nested_selection.py --n-jobs 12
 python ml/compare_schemes.py
+python ml/cohort_sensitivity.py --n-jobs 12
+python ml/cohort_sensitivity_subgroups.py
+python ml/make_table_S18.py
 ```
 
 ### Python — figures
@@ -113,7 +119,7 @@ python ml/compare_schemes.py
 |---|---|
 | `figures/figure_2_and_S2.py --space both` | Figure 2 (taxonomic profiles) and Figure S2 (pathway profiles) |
 | `figures/figure_3.py --mode both` | Figure 3 (pooled) and Figure S3 (meta-analysis) |
-| `figures/figure_4_and_5.py --task both` | Figures 4 and 5, the fitted final models, and the SHAP rankings behind Table S18 |
+| `figures/figure_4_and_5.py --task both` | Figures 4 and 5, the fitted final models, and the SHAP rankings behind Table S19 |
 | `figures/palettes.py` | colour scales; imported by `figure_4_and_5.py`, not run directly |
 
 Figure S4 comes from `R/08_specificity_figure.R`. Figure S1 comes from

@@ -15,7 +15,7 @@ Panel B  Nested leave-one-study-out. The configuration is chosen by an inner
 
 Panel C  SHAP for the configuration panel B selected, restricted to configurations
          in which one model input is one taxon. The full ranking is written to
-         shap_feature_ranking_<task>.csv and becomes Table S18.
+         shap_feature_ranking_<task>.csv and becomes Table S19.
 
 Run:  python figures/figure_4_and_5.py --task both
 """
@@ -303,7 +303,7 @@ def is_pathway(name: str) -> bool:
 
 
 def export_shap_ranking(task: str, names, vals, X) -> None:
-    """Write the full SHAP ranking for every feature; this becomes Table S18.
+    """Write the full SHAP ranking for every feature; this becomes Table S19.
 
     Direction is the sign of the correlation between a feature value and its SHAP
     value. Mean signed SHAP is not usable here: for a linear model it is
